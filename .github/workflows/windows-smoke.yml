@@ -48,11 +48,47 @@ jobs:
           using System;
           using System.ComponentModel;
           using System.Runtime.InteropServices;
+          using System.Text;
           public static class SmokeToken {
             [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint rights, bool inherit, int pid);
             [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
             [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetTokenInformation(IntPtr token, int kind, out int value, int size, out int needed);
             [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+            [DllImport("advapi32.dll", SetLastError=true)] static extern bool SaferCreateLevel(uint scope, uint level, uint flags, out IntPtr handle, IntPtr reserved);
+            [DllImport("advapi32.dll", SetLastError=true)] static extern bool SaferComputeTokenFromLevel(IntPtr level, IntPtr input, out IntPtr token, uint flags, IntPtr reserved);
+            [DllImport("advapi32.dll")] static extern bool SaferCloseLevel(IntPtr level);
+            [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct StartupInfo {
+              public uint cb; public string reserved, desktop, title;
+              public uint x,y,xSize,ySize,xChars,yChars,fill,flags;
+              public ushort show,reservedSize; public IntPtr reservedPointer,input,output,error;
+            }
+            [StructLayout(LayoutKind.Sequential)] struct ProcessInfo {
+              public IntPtr process,thread; public uint processId,threadId;
+            }
+            [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+            static extern bool CreateProcessAsUserW(IntPtr token, string app, StringBuilder command, IntPtr processAttributes, IntPtr threadAttributes, bool inherit, uint flags, IntPtr environment, string directory, ref StartupInfo startup, out ProcessInfo process);
+            [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+            static extern bool CreateProcessWithTokenW(IntPtr token, uint logonFlags, string app, StringBuilder command, uint flags, IntPtr environment, string directory, ref StartupInfo startup, out ProcessInfo process);
+            public static int StartBasicUser(string executable, string directory) {
+              IntPtr level = IntPtr.Zero, token = IntPtr.Zero;
+              try {
+                if (!SaferCreateLevel(2, 0x20000, 1, out level, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error(), "SaferCreateLevel failed");
+                if (!SaferComputeTokenFromLevel(level, IntPtr.Zero, out token, 0, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error(), "SaferComputeTokenFromLevel failed");
+                var startup = new StartupInfo { cb = (uint)Marshal.SizeOf<StartupInfo>(), desktop = "winsta0\\default" };
+                ProcessInfo process;
+                var command = new StringBuilder("\"" + executable + "\"");
+                bool started = CreateProcessAsUserW(token, executable, command, IntPtr.Zero, IntPtr.Zero, false, 0, IntPtr.Zero, directory, ref startup, out process);
+                int error = started ? 0 : Marshal.GetLastWin32Error();
+                if (!started && error == 1314) {
+                  command = new StringBuilder("\"" + executable + "\"");
+                  started = CreateProcessWithTokenW(token, 0, executable, command, 0, IntPtr.Zero, directory, ref startup, out process);
+                  if (!started) error = Marshal.GetLastWin32Error();
+                }
+                if (!started) throw new Win32Exception(error, "Restricted process launch failed");
+                CloseHandle(process.thread); CloseHandle(process.process);
+                return (int)process.processId;
+              } finally { if (token != IntPtr.Zero) CloseHandle(token); if (level != IntPtr.Zero) SaferCloseLevel(level); }
+            }
             public static bool IsElevated(int pid) {
               IntPtr process = OpenProcess(0x1000, false, pid), token = IntPtr.Zero;
               if (process == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -69,18 +105,11 @@ jobs:
             # permissions, security policy, services, or system settings are changed.
             $env:TEMP = $tempRoot
             $env:TMP = $tempRoot
-            $start = [Diagnostics.ProcessStartInfo]::new()
-            $start.FileName = Join-Path $env:SystemRoot 'System32\runas.exe'
-            $start.UseShellExecute = $false
-            $start.RedirectStandardOutput = $true
-            $start.RedirectStandardError = $true
-            # runas parses its own raw command line. Avoid ArgumentList's extra
-            # escaped inner quotes around the command passed to runas.
-            $start.Arguments = '/env /trustlevel:0x20000 "' + $portable + '"'
             $clock = [Diagnostics.Stopwatch]::StartNew()
-            $launcher = [Diagnostics.Process]::Start($start)
-            $launchOutput = $launcher.StandardOutput.ReadToEndAsync()
-            $launchError = $launcher.StandardError.ReadToEndAsync()
+            # Use the documented SAFER APIs directly because runas exits with
+            # code 1 and no output on this hosted runner before extracting anything.
+            $report.launchMethod = 'SAFER_NORMALUSER'
+            $launcher = Get-Process -Id ([SmokeToken]::StartBasicUser($portable, $workRoot))
             $mainProcess = $null
             while ($clock.Elapsed.TotalSeconds -lt 10) {
               $owned = @(Get-CimInstance Win32_Process -Filter "Name = 'TikirPC.exe'" | Where-Object {
