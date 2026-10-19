@@ -8,7 +8,7 @@ Windows 10 / 11 (64 bit) için erken sürüm bilgisayar destek uygulaması.
 
 Sürüm 0.1.0: yerel çözüm planları, onaylı DNS önbelleği temizleme, standart kurulumdaki Discord'u zorlamadan kapatıp açma, Windows ayarlarına yönlendirme, cihazda kalan işlem geçmişi ve isteğe bağlı OpenAI API bağlantısı. API anahtarı uygulamanın bağlantı ayarlarından eklenir. Bu erken sürüm ücret toplamaz; kişisel API kullanımı OpenAI hesabına yansır.
 
-Paketler imzasızdır ve macOS üzerinde Windows hedefi için üretilmiştir. Windows cihazda uçtan uca çalıştırma ve canlı API testi henüz yapılmadı. Her yazılım veya donanım arızasını çözmez. Kurulum ve taşınabilir sürüm aynı uygulamayı içerir. Dosya bütünlüğünü SHA256SUMS.txt ile kontrol edebilirsiniz.
+Paketler imzasızdır ve macOS üzerinde Windows hedefi için üretilmiştir. [Windows açılış kontrolünde](https://github.com/Renanuya/tikir-pc/actions/runs/39304389181) yayımlanan Portable dosyasının SHA256 değeri doğrulandı, uygulama penceresi açıldı ve paket içindeki salt okunur ses aygıtı sorgusu çalıştı. Bu kontrol yükseltilmiş GitHub runner oturumunda yapıldı; standart kullanıcı, kurulum, gerçek onarım ve canlı API testleri henüz yapılmadı. Her yazılım veya donanım arızasını çözmez. Kurulum ve taşınabilir sürüm aynı uygulamayı içerir. Dosya bütünlüğünü SHA256SUMS.txt ile kontrol edebilirsiniz.
 
 Destek: renanuya@gmail.com
 
