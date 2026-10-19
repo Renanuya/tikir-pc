@@ -72,11 +72,15 @@ jobs:
             $start = [Diagnostics.ProcessStartInfo]::new()
             $start.FileName = Join-Path $env:SystemRoot 'System32\runas.exe'
             $start.UseShellExecute = $false
-            $start.ArgumentList.Add('/env')
-            $start.ArgumentList.Add('/trustlevel:0x20000')
-            $start.ArgumentList.Add('"' + $portable + '"')
+            $start.RedirectStandardOutput = $true
+            $start.RedirectStandardError = $true
+            # runas parses its own raw command line. Avoid ArgumentList's extra
+            # escaped inner quotes around the command passed to runas.
+            $start.Arguments = '/env /trustlevel:0x20000 "' + $portable + '"'
             $clock = [Diagnostics.Stopwatch]::StartNew()
             $launcher = [Diagnostics.Process]::Start($start)
+            $launchOutput = $launcher.StandardOutput.ReadToEndAsync()
+            $launchError = $launcher.StandardError.ReadToEndAsync()
             $mainProcess = $null
             while ($clock.Elapsed.TotalSeconds -lt 10) {
               $owned = @(Get-CimInstance Win32_Process -Filter "Name = 'TikirPC.exe'" | Where-Object {
@@ -103,6 +107,16 @@ jobs:
             $report.error = $_.Exception.Message
             throw
           } finally {
+            if ($launcher) {
+              $report.launcherExited = $launcher.HasExited
+              if ($launcher.HasExited) {
+                $report.launcherExitCode = $launcher.ExitCode
+              }
+              if ($launchOutput -and $launchOutput.IsCompleted) { $report.launcherOutput = $launchOutput.Result }
+              if ($launchError -and $launchError.IsCompleted) { $report.launcherError = $launchError.Result }
+            }
+            $report.observedAppProcesses = @(Get-CimInstance Win32_Process -Filter "Name = 'TikirPC.exe'" | Select-Object ProcessId, ParentProcessId, ExecutablePath)
+            $report.extractedFiles = @(Get-ChildItem -Path $tempRoot -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 12 -ExpandProperty Name)
             # Stop only processes launched from this run's unique directory.
             $owned = @(Get-CimInstance Win32_Process | Where-Object {
               $_.ExecutablePath -and $_.ExecutablePath.StartsWith($workRoot, [StringComparison]::OrdinalIgnoreCase)
