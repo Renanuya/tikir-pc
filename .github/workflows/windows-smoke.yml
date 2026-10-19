@@ -1,0 +1,126 @@
+name: Windows portable startup smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  startup:
+    runs-on: windows-latest
+    timeout-minutes: 6
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Verify release and check non-elevated startup
+        env:
+          RELEASE_URL: https://github.com/Renanuya/tikir-pc/releases/download/v0.1.0/Tikir-PC-0.1.0-Portable-x64.exe
+          EXPECTED_SHA256: 9a6052793b63e129c6c1516412b3edca6304ffd22b7e8b06f2b1040f06d123aa
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $workRoot = Join-Path $env:RUNNER_TEMP ('tikir-smoke-' + [guid]::NewGuid().ToString('N'))
+          $reportPath = Join-Path $env:RUNNER_TEMP 'tikir-windows-smoke.json'
+          $null = New-Item -ItemType Directory -Path $workRoot
+          $tempRoot = Join-Path $workRoot 'portable-temp'
+          $null = New-Item -ItemType Directory -Path $tempRoot
+          $portable = Join-Path $workRoot 'Tikir-PC-0.1.0-Portable-x64.exe'
+          $report = [ordered]@{
+            passed = $false
+            startedUtc = [DateTime]::UtcNow.ToString('o')
+            expectedSha256 = $env:EXPECTED_SHA256
+            actualSha256 = $null
+            releaseUrl = $env:RELEASE_URL
+            startupBudgetSeconds = 10
+            mainWindow = $null
+            tokenElevated = $null
+            limits = 'Startup only. No API key, API calls, diagnosis, repair actions, or installer test. Hosted runner desktop differs from a customer PC.'
+          }
+          $launcher = $null
+          $previousTemp = $env:TEMP
+          $previousTmp = $env:TMP
+          try {
+            Invoke-WebRequest -Uri $env:RELEASE_URL -OutFile $portable -TimeoutSec 120
+            $report.actualSha256 = (Get-FileHash -Path $portable -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($report.actualSha256 -ne $env:EXPECTED_SHA256) { throw 'Release hash mismatch; executable was not launched.' }
+            Add-Type -TypeDefinition @'
+          using System;
+          using System.ComponentModel;
+          using System.Runtime.InteropServices;
+          public static class SmokeToken {
+            [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint rights, bool inherit, int pid);
+            [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+            [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetTokenInformation(IntPtr token, int kind, out int value, int size, out int needed);
+            [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+            public static bool IsElevated(int pid) {
+              IntPtr process = OpenProcess(0x1000, false, pid), token = IntPtr.Zero;
+              if (process == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+              try {
+                if (!OpenProcessToken(process, 8, out token)) throw new Win32Exception(Marshal.GetLastWin32Error());
+                int elevated, needed;
+                if (!GetTokenInformation(token, 20, out elevated, 4, out needed)) throw new Win32Exception(Marshal.GetLastWin32Error());
+                return elevated != 0;
+              } finally { if (token != IntPtr.Zero) CloseHandle(token); CloseHandle(process); }
+            }
+          }
+          '@
+            # BasicUser restricts only the launched process token. No accounts,
+            # permissions, security policy, services, or system settings are changed.
+            $env:TEMP = $tempRoot
+            $env:TMP = $tempRoot
+            $start = [Diagnostics.ProcessStartInfo]::new()
+            $start.FileName = Join-Path $env:SystemRoot 'System32\runas.exe'
+            $start.UseShellExecute = $false
+            $start.ArgumentList.Add('/env')
+            $start.ArgumentList.Add('/trustlevel:0x20000')
+            $start.ArgumentList.Add('"' + $portable + '"')
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            $launcher = [Diagnostics.Process]::Start($start)
+            $mainProcess = $null
+            while ($clock.Elapsed.TotalSeconds -lt 10) {
+              $owned = @(Get-CimInstance Win32_Process -Filter "Name = 'TikirPC.exe'" | Where-Object {
+                $_.ExecutablePath -and $_.ExecutablePath.StartsWith($workRoot, [StringComparison]::OrdinalIgnoreCase)
+              })
+              foreach ($candidate in $owned) {
+                $process = Get-Process -Id $candidate.ProcessId -ErrorAction SilentlyContinue
+                if ($process -and $process.MainWindowHandle -ne 0 -and $process.MainWindowTitle -match 'Tıkır PC') {
+                  $mainProcess = $process
+                  break
+                }
+              }
+              if ($mainProcess) { break }
+              Start-Sleep -Milliseconds 250
+            }
+            if (-not $mainProcess) { throw 'No owned TikirPC.exe main window appeared within 10 seconds. Desktop or BasicUser launch support may be unavailable on this runner.' }
+            $report.mainWindow = [ordered]@{ pid = $mainProcess.Id; title = $mainProcess.MainWindowTitle; elapsedSeconds = $clock.Elapsed.TotalSeconds }
+            $report.tokenElevated = [SmokeToken]::IsElevated($mainProcess.Id)
+            if ($report.tokenElevated) { throw 'Application token is elevated; non-admin startup was not verified.' }
+            $mainProcess.Refresh()
+            if ($mainProcess.HasExited) { throw 'Application exited immediately after window discovery.' }
+            $report.passed = $true
+          } catch {
+            $report.error = $_.Exception.Message
+            throw
+          } finally {
+            # Stop only processes launched from this run's unique directory.
+            $owned = @(Get-CimInstance Win32_Process | Where-Object {
+              $_.ExecutablePath -and $_.ExecutablePath.StartsWith($workRoot, [StringComparison]::OrdinalIgnoreCase)
+            })
+            foreach ($process in $owned) { Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue }
+            if ($launcher -and -not $launcher.HasExited) { $launcher.Kill() }
+            $env:TEMP = $previousTemp
+            $env:TMP = $previousTmp
+            $report.completedUtc = [DateTime]::UtcNow.ToString('o')
+            $report | ConvertTo-Json -Depth 6 | Set-Content -Path $reportPath -Encoding utf8
+            Get-Content -Path $reportPath
+          }
+
+      - name: Upload startup evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: tikir-windows-smoke
+          path: ${{ runner.temp }}/tikir-windows-smoke.json
+          retention-days: 7
+          if-no-files-found: error
